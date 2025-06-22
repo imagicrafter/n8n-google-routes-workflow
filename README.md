@@ -201,7 +201,7 @@ The workflow is designed to be flexible and can be customized for your specific 
 
 ## 📊 ROI Calculator
 
-Use our [Route Optimization ROI Calculator](link-to-calculator) to estimate your potential savings:
+Use our [Route Optimization ROI Calculator]([link-to-calculator](https://github.com/imagicrafter/n8n-google-routes-workflow/blob/main/Route_Optimization_Calc.html)) to estimate your potential savings:
 
 - Input your current vehicle count and operation details
 - See projected fuel, time, and planning savings
