@@ -1,0 +1,276 @@
+{
+  "name": "google-routes-workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, name, email, phone, address, confirmed_address,\nservice_type, \nTRIM(TO_CHAR(preferred_date,'Day MM-DD-YYYY')) AS date_with_day\nFROM bookings\nWHERE preferred_date::date = $1\nAND confirmed_address is NOT NULL\n--ORDER BY preferred_date desc;",
+        "options": {
+          "queryReplacement": "={{ $json.body.date }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -280,
+        100
+      ],
+      "id": "99e2c431-1b2b-4b01-a216-b9ea9efb1b14",
+      "name": "select",
+      "credentials": {
+        "postgres": {
+          "id": "post-gres-credentials",
+          "name": "postgres-database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fieldsToAggregate": {
+          "fieldToAggregate": [
+            {
+              "fieldToAggregate": "confirmed_address"
+            },
+            {
+              "fieldToAggregate": "service_type"
+            },
+            {
+              "fieldToAggregate": "name",
+              "renameField": true,
+              "outputFieldName": "customerNames"
+            },
+            {
+              "fieldToAggregate": "phone",
+              "renameField": true,
+              "outputFieldName": "customerPhones"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.aggregate",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        100
+      ],
+      "id": "6a017d9a-27ec-486c-8192-615ff1d93b05",
+      "name": "group-addresses"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the input data\nconst inputData = $input.first().json;\n\n// Extract addresses, service types, and customer information\nconst addresses = inputData.confirmed_address;\nconst serviceTypes = inputData.service_type;\nconst customerNames = inputData.customerNames;\nconst customerPhones = inputData.customerPhones;\n\n// Define your starting/ending location\nconst startingAddress = \"2540 SW Winterbrook Ct, Lee's Summit MO 64081\";\n\n// Validate that we have matching arrays\nif (addresses.length !== serviceTypes.length) {\n  throw new Error(`Mismatch: ${addresses.length} addresses but ${serviceTypes.length} service types`);\n}\n\nif (addresses.length !== customerNames.length) {\n  throw new Error(`Mismatch: ${addresses.length} addresses but ${customerNames.length} customer names`);\n}\n\nif (addresses.length !== customerPhones.length) {\n  throw new Error(`Mismatch: ${addresses.length} addresses but ${customerPhones.length} customer phones`);\n}\n\nreturn [{\n  json: {\n    origin: startingAddress,\n    destination: startingAddress,\n    intermediateAddresses: addresses,\n    customerTypes: serviceTypes, // Will be \"twocan\", \"onecan\", \"threecan\", etc.\n    customerNames: customerNames,\n    customerPhones: customerPhones,\n    totalStops: addresses.length,\n    debugInfo: {\n      addressCount: addresses.length,\n      serviceTypeCount: serviceTypes.length,\n      customerNameCount: customerNames.length,\n      customerPhoneCount: customerPhones.length,\n      addresses: addresses,\n      serviceTypes: serviceTypes,\n      customerNames: customerNames,\n      customerPhones: customerPhones\n    }\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        100
+      ],
+      "id": "ebd9fd32-cc3a-4488-a71c-884021eb1ce5",
+      "name": "prepare-addresses-for-route-plan"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://routes.googleapis.com/directions/v2:computeRoutes",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Goog-Api-Key",
+              "value": "GOOGLE-MAPS-API-KEY"
+            },
+            {
+              "name": "X-Goog-FieldMask",
+              "value": "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline,routes.legs,routes.optimizedIntermediateWaypointIndex"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"origin\": {\n    \"address\": \"{{ $json.origin }}\"\n  },\n  \"destination\": {\n    \"address\": \"{{ $json.destination }}\"\n  },\n  \"intermediates\": {{ JSON.stringify($json.intermediateAddresses.map(addr => ({ address: addr }))) }},\n  \"travelMode\": \"DRIVE\",\n  \"optimizeWaypointOrder\": true,\n  \"computeAlternativeRoutes\": false,\n  \"routeModifiers\": {\n    \"avoidTolls\": false,\n    \"avoidHighways\": false,\n    \"avoidFerries\": false\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        380,
+        100
+      ],
+      "id": "2512594f-1cb3-4235-b9ed-a6a32c2982d8",
+      "name": "route-planning"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Get the route response\nconst routeResponse = $input.first().json;\n// Extract route information\nconst route = routeResponse.routes[0];\nconst optimizedOrder = route.optimizedIntermediateWaypointIndex || [];\n\n// Get the original addresses from the 'prepare-addresses-for-route-plan' node\nconst originalData = $('prepare-addresses-for-route-plan').first().json;\nconst originalAddresses = originalData.intermediateAddresses;\nconst startingAddress = originalData.origin;\nconst customerTypes = originalData.customerTypes || [];\nconst customerNames = originalData.customerNames || [];\nconst customerPhones = originalData.customerPhones || [];\n\n// Create optimized address order with customer details\nconst optimizedAddresses = optimizedOrder.map(index => originalAddresses[index]);\nconst optimizedServiceTypes = optimizedOrder.map(index => customerTypes[index]);\nconst optimizedCustomerNames = optimizedOrder.map(index => customerNames[index]);\nconst optimizedCustomerPhones = optimizedOrder.map(index => customerPhones[index]);\n\n// Build FULL ROUTE DIRECTIONS URL (complete optimized route for all stops)\nlet mapsUrl = \"https://www.google.com/maps/dir/\";\n// Add starting point\nmapsUrl += encodeURIComponent(startingAddress) + \"/\";\n// Add all optimized addresses in order\noptimizedAddresses.forEach(address => {\n  mapsUrl += encodeURIComponent(address) + \"/\";\n});\n// Return to starting point\nmapsUrl += encodeURIComponent(startingAddress);\n\n// Count service types\nconst serviceCounts = optimizedServiceTypes.reduce((counts, type) => {\n  counts[type] = (counts[type] || 0) + 1;\n  return counts;\n}, {});\n\n// Function to create map location link (opens address in Google Maps for navigation from current location)\nfunction createMapLocationLink(address) {\n  return `https://www.google.com/maps/place/${encodeURIComponent(address)}`;\n}\n\n// Function to format service type for display\nfunction formatServiceType(serviceType) {\n  switch(serviceType?.toLowerCase()) {\n    case 'onecan':\n    case '1can':\n      return '1-Can';\n    case 'twocan':\n    case '2can':\n      return '2-Can';\n    case 'threecan':\n    case '3can':\n      return '3-Can';\n    case 'fourcan':\n    case '4can':\n      return '4-Can';\n    default:\n      // If it's already in the format \"3-Can\" or similar, return as is\n      // Otherwise, try to extract number and format\n      if (serviceType?.includes('-')) {\n        return serviceType;\n      }\n      return serviceType || 'Unknown';\n  }\n}\n\n// Create stop list with map location links and customer details\nconst stopList = optimizedAddresses.map((addr, i) => {\n  return {\n    stopNumber: i + 1,\n    serviceType: formatServiceType(optimizedServiceTypes[i]),\n    address: addr,\n    customerName: optimizedCustomerNames[i] || 'N/A',\n    customerPhone: optimizedCustomerPhones[i] || 'N/A',\n    mapLocation: createMapLocationLink(addr)\n  };\n});\n\n// Create route instructions with customer details (stops only, no start/return)\nconst routeInstructions = optimizedAddresses.map((addr, i) => \n  `Stop ${i + 1} - ${formatServiceType(optimizedServiceTypes[i])}: ${addr} | Customer: ${optimizedCustomerNames[i] || 'N/A'} | Phone: ${optimizedCustomerPhones[i] || 'N/A'}`\n);\n\nreturn [{\n  json: {\n    routeSummary: {\n      totalStops: originalAddresses.length,\n      serviceCounts: serviceCounts,\n      mapsUrl: mapsUrl\n    },\n    stopList: stopList,\n    routeInstructions: routeInstructions\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        100
+      ],
+      "id": "2b1f83d7-68c0-46ed-a9ad-c4e46a2f9317",
+      "name": "generate-route-map-link"
+    },
+    {
+      "parameters": {
+        "respondWith": "allIncomingItems",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        820,
+        100
+      ],
+      "id": "7eabc3d4-f50d-49e7-803a-8441f365d0ce",
+      "name": "Respond to Webhook"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "e67d26d0-009c-42ab-b410-a3bc72a9c522",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -500,
+        100
+      ],
+      "id": "3e8ca069-a8c7-4c7d-b563-1bc8f401e153",
+      "name": "Webhook",
+      "webhookId": "e67d26d0-009c-42ab-b410-a3bc72a9c522"
+    },
+    {
+      "parameters": {
+        "content": "## Get Delivery Plan\nQuery the database for the delivery addresses that are planned for the next day.   \n\nThen group them into a single json object",
+        "height": 360,
+        "width": 600,
+        "color": 4
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -520,
+        -80
+      ],
+      "id": "c0b67644-a06d-4c6d-a41e-9ae274dcca4f",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "## Set Starting Address for Route and call Google's Route Plan API\nLet's google know which address is the starting address for optimizing the route.",
+        "height": 360,
+        "width": 440,
+        "color": 5
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        100,
+        -80
+      ],
+      "id": "ce0e2598-3cab-4ccf-a2b1-90164a93d332",
+      "name": "Sticky Note1"
+    },
+    {
+      "parameters": {
+        "content": "## Prepare Optimized Route Plan for Agent\nFormat the route plan output to include the link to the full route plan and provide a link to each location to be visited so that the user can see the entire route or get directions to a specific address along the route.",
+        "height": 360,
+        "width": 440,
+        "color": 6
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        560,
+        -80
+      ],
+      "id": "717ae7ac-bd9d-4317-9f59-81343721b595",
+      "name": "Sticky Note2"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "select": {
+      "main": [
+        [
+          {
+            "node": "group-addresses",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "group-addresses": {
+      "main": [
+        [
+          {
+            "node": "prepare-addresses-for-route-plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare-addresses-for-route-plan": {
+      "main": [
+        [
+          {
+            "node": "route-planning",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "route-planning": {
+      "main": [
+        [
+          {
+            "node": "generate-route-map-link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "generate-route-map-link": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "select",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "175ad1d8-d391-4210-8f77-14c5bc4d1005",
+  "meta": {
+    "instanceId": "d48c7a1a5fc7f1884e673978ef564739cefd9d32727de2b5c381c7d32a7659c1"
+  },
+  "id": "0V32bZJZJcCgXGz7",
+  "tags": []
+}
